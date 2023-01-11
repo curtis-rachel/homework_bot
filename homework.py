@@ -1,39 +1,31 @@
 import time
-import os
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 from http import HTTPStatus
 import requests
 import telegram
 from json.decoder import JSONDecodeError
-from dotenv import load_dotenv
 from exceptions import APIRequestError
+from settings import (
+    PRACTICUM_TOKEN,
+    TELEGRAM_TOKEN,
+    TELEGRAM_CHAT_ID,
+    ENDPOINT,
+    HEADERS,
+    HOMEWORK_VERDICTS,
+    RETRY_PERIOD
+)
 
-load_dotenv()
-
-
-PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-
-RETRY_PERIOD = 600
-ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
-HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
-
-
-HOMEWORK_VERDICTS = {
-    'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
-    'reviewing': 'Работа взята на проверку ревьюером.',
-    'rejected': 'Работа проверена: у ревьюера есть замечания.'
-}
+logger = logging.getLogger(__name__)
 
 
-def check_tokens():
+def check_tokens() -> bool:
     """Проверяем доступность переменных окружения."""
     return all((PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID))
 
 
-def send_message(bot, message):
+def send_message(bot: telegram.Bot, message: str) -> None:
     """Отправляет сообщение пользователю."""
     try:
         bot.send_message(
@@ -41,10 +33,8 @@ def send_message(bot, message):
             text=message
         )
         logging.debug(f'Пользователю отправилось сообщение {message}')
-        return True
     except Exception:
         logging.error('Сбой при отправке сообщения в Telegram')
-        return False
 
 
 def get_api_answer(current_timestamp: int) -> dict:
@@ -69,52 +59,30 @@ def get_api_answer(current_timestamp: int) -> dict:
 
 
 def check_response(response: dict) -> list:
-    """Проверяем API на корректность."""
-    try:
-        homeworks = response['homeworks']
-    except KeyError:
-        logging.error('Ключ homeworks не найден в ответе API')
-        raise KeyError('Ключ homeworks не найден в ответе API')
-    if 'current_date' not in response:
-        logging.error('Ключ current_date не найден в ответе API')
-        raise KeyError('Ключ current_date не найден в ответе API')
-    elif not isinstance(response, dict):
-        logging.error('Неверный тип переменной, это должен быть словарь')
-        raise TypeError('Неверный тип переменной, это должен быть словарь')
-    elif not isinstance(homeworks, list):
-        logging.error('Отсутствует список домашних работ')
-        raise TypeError('Отсутствует список домашних работ')
-    return homeworks
+    """Ответ API на соответствие документации."""
+    if not isinstance(response, dict):
+        raise TypeError('Тип "response" не словарь')
+    if "homeworks" not in response:
+        raise KeyError("Ключа 'homeworks' нет в словаре response")
+    if "current_date" not in response:
+        raise KeyError("Ключа 'current_date' нет в словаре response")
+    if not isinstance(response.get('homeworks'), list):
+        raise TypeError("Тип переменной 'homeworks' не список")
+    return response.get('homeworks')
 
 
-def parse_status(homework):
+def parse_status(homework: dict) -> str:
     """Извлекает статус домашней работы."""
-    try:
-        homework_name = str(homework['homework_name'])
-    except Exception:
-        logging.error('Не удалось узнать название работы')
-    try:
-        homework_status = homework['status']
-    except Exception:
-        logging.error('Не удалось узнать статус работы')
-    if homework_status == 'approved':
-        verdict = str(HOMEWORK_VERDICTS[homework_status])
-        return str(
-            f'Изменился статус проверки работы "{homework_name}". {verdict}'
-        )
-    elif homework_status == 'reviewing':
-        verdict = str(HOMEWORK_VERDICTS[homework_status])
-        return str(
-            f'Изменился статус проверки работы "{homework_name}". {verdict}'
-        )
-    elif homework_status == 'rejected':
-        verdict = str(HOMEWORK_VERDICTS[homework_status])
-        return str(
-            f'Изменился статус проверки работы "{homework_name}". {verdict}'
-        )
-    else:
-        logging.error('Не обнаружен статус домашней робаты')
-        raise KeyError
+    if 'homework_name' not in homework:
+        raise KeyError('Отсутствует ключ "homework_name" в ответе API')
+    if 'status' not in homework:
+        raise Exception('Отсутствует ключ "status" в ответе API')
+    homework_name = homework['homework_name']
+    homework_status = homework['status']
+    if homework_status not in HOMEWORK_VERDICTS:
+        raise Exception(f'Неизвестный статус работы: {homework_status}')
+    verdict = HOMEWORK_VERDICTS[homework_status]
+    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main():
@@ -128,10 +96,10 @@ def main():
         try:
             response = get_api_answer(current_timestamp)
             homework = check_response(response)
-            if len(homework) > 0:
+            if homework:
                 message = parse_status(homework[0])
-            elif len(homework) == 0:
-                message = 'Отправьте работу на проверку'
+            else:
+                message = 'Новых работ нет'
             send_message(bot, message)
             current_timestamp = response['current_date']
         except Exception as error:
@@ -143,13 +111,14 @@ def main():
 
 
 if __name__ == '__main__':
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler(stream=sys.stdout)
-    fmt = '[%(asctime)s: %(levelname)s] %(message)s'
-    handler.setFormatter(logging.Formatter(fmt))
-    logger.addHandler(handler)
-    try:
-        main()
-    except KeyboardInterrupt:
-        logging.info('Работа бота завершена.')
+    logging.basicConfig(
+        level=logging.DEBUG,
+        filename='program.log',
+        format='%(asctime)s, %(levelname)s, %(message)s, %(name)s'
+    )
+logger.setLevel(logging.INFO)
+handler = RotatingFileHandler(
+    'my_logger.log',
+    maxBytes=50000000,
+    backupCount=5)
+logger.addHandler(handler)
